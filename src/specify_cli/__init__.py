@@ -25,6 +25,7 @@ Or install globally:
 """
 
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -699,9 +700,204 @@ def merge_json_files(existing_path: Path, new_content: dict, verbose: bool = Fal
 
     return merged
 
-def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False, github_token: str = None) -> Tuple[Path, dict]:
-    repo_owner = "github"
-    repo_name = "spec-kit"
+def _parse_template_repo(repo_slug: str) -> Tuple[str, str]:
+    """Parse 'owner/repo' into (owner, repo). Raises ValueError if invalid."""
+    parts = repo_slug.strip().split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"Template repo must be 'owner/repo', got: {repo_slug!r}")
+    return parts[0], parts[1]
+
+
+def _get_bundled_template_root() -> Optional[Path]:
+    """Return Path to bundled template_data if present (when installed from git with bundled templates)."""
+    root = Path(__file__).resolve().parent / "template_data"
+    if (root / "templates" / "commands").is_dir() and (root / "scripts").is_dir():
+        return root
+    return None
+
+
+def _rewrite_paths_spec(text: str) -> str:
+    """Apply path rewrites to match create-release-packages.sh."""
+    text = re.sub(r"(/?)(memory/)", r".specify/memory/", text)
+    text = re.sub(r"(/?)(scripts/)", r".specify/scripts/", text)
+    text = re.sub(r"(/?)(templates/)", r".specify/templates/", text)
+    text = re.sub(r"\.specify\.specify/", ".specify/", text)
+    return text
+
+
+def _parse_command_md(content: str, script_variant: str) -> Tuple[str, str, str, str]:
+    """Parse command .md: return (description, script_command, agent_script_command, body_without_scripts_sections)."""
+    content = content.replace("\r", "")
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return "", "", "", content
+    try:
+        front = yaml.safe_load(parts[1])
+    except Exception:
+        front = {}
+    if not isinstance(front, dict):
+        front = {}
+    description = str(front.get("description") or "").strip()
+    scripts = front.get("scripts") or {}
+    script_command = (scripts.get(script_variant) or "(Missing script command for " + script_variant + ")").strip()
+    agent_scripts = front.get("agent_scripts") or {}
+    agent_script_command = (agent_scripts.get(script_variant) or "").strip()
+    # Rebuild frontmatter without scripts/ and agent_scripts/ blocks (match create-release-packages.sh awk)
+    front_lines = parts[1].strip().split("\n")
+    out_front_lines = []
+    skip_block = False
+    for line in front_lines:
+        if line.strip() in ("scripts:", "agent_scripts:"):
+            skip_block = True
+            continue
+        if skip_block:
+            if line.startswith(" ") or line.startswith("\t"):
+                continue
+            skip_block = False
+        out_front_lines.append(line)
+    body = "---\n" + "\n".join(out_front_lines) + "\n---\n" + parts[2].lstrip("\n")
+    return description, script_command, agent_script_command, body
+
+
+def _generate_commands_from_bundle(
+    bundle_root: Path,
+    agent: str,
+    script_type: str,
+    arg_format: str,
+    ext: str,
+    output_dir: Path,
+) -> None:
+    """Generate agent command files from bundle templates/commands/*.md (mirrors create-release-packages.sh)."""
+    script_variant = "sh" if script_type == "sh" else "ps"
+    commands_dir = bundle_root / "templates" / "commands"
+    if not commands_dir.is_dir():
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for md_path in sorted(commands_dir.glob("*.md")):
+        content = md_path.read_text(encoding="utf-8", errors="replace")
+        description, script_command, agent_script_command, body = _parse_command_md(content, script_variant)
+        body = body.replace("{SCRIPT}", script_command)
+        if agent_script_command:
+            body = body.replace("{AGENT_SCRIPT}", agent_script_command)
+        body = body.replace("{ARGS}", arg_format).replace("__AGENT__", agent)
+        body = _rewrite_paths_spec(body)
+        name = md_path.stem
+        out_path = output_dir / f"speckit.{name}.{ext}"
+        if ext == "toml":
+            escaped = body.replace("\\", "\\\\")
+            out_path.write_text(
+                f'description = "{description}"\n\nprompt = """\n{escaped}\n"""\n',
+                encoding="utf-8",
+            )
+        else:
+            out_path.write_text(body, encoding="utf-8")
+
+
+def _extract_from_bundled_template(
+    bundle_root: Path,
+    project_path: Path,
+    ai_assistant: str,
+    script_type: str,
+    is_current_dir: bool,
+    *,
+    tracker: StepTracker | None = None,
+) -> None:
+    """Build template from bundled template_data and extract to project_path (no download)."""
+    # Agent output format: (ext, arg_format) per create-release-packages.sh
+    agent_formats: dict[str, Tuple[str, str]] = {
+        "claude": ("md", "$ARGUMENTS"),
+        "gemini": ("toml", "{{args}}"),
+        "cursor-agent": ("md", "$ARGUMENTS"),
+        "qwen": ("toml", "{{args}}"),
+        "opencode": ("md", "$ARGUMENTS"),
+        "windsurf": ("md", "$ARGUMENTS"),
+        "codex": ("md", "$ARGUMENTS"),
+        "kilocode": ("md", "$ARGUMENTS"),
+        "auggie": ("md", "$ARGUMENTS"),
+        "roo": ("md", "$ARGUMENTS"),
+        "codebuddy": ("md", "$ARGUMENTS"),
+        "qodercli": ("md", "$ARGUMENTS"),
+        "amp": ("md", "$ARGUMENTS"),
+        "shai": ("md", "$ARGUMENTS"),
+        "kiro-cli": ("md", "$ARGUMENTS"),
+        "agy": ("md", "$ARGUMENTS"),
+        "bob": ("md", "$ARGUMENTS"),
+        "generic": ("md", "$ARGUMENTS"),
+    }
+    ext, arg_format = agent_formats.get(ai_assistant, ("md", "$ARGUMENTS"))
+    if ai_assistant == "copilot":
+        ext = "agent.md"
+        arg_format = "$ARGUMENTS"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        spec_dir = base / ".specify"
+        spec_dir.mkdir(parents=True)
+        if (bundle_root / "memory").is_dir():
+            shutil.copytree(bundle_root / "memory", spec_dir / "memory")
+        scripts_src = bundle_root / "scripts" / ("bash" if script_type == "sh" else "powershell")
+        if scripts_src.is_dir():
+            (spec_dir / "scripts").mkdir(exist_ok=True)
+            shutil.copytree(scripts_src, spec_dir / "scripts" / scripts_src.name)
+        templates_src = bundle_root / "templates"
+        if templates_src.is_dir():
+            (spec_dir / "templates").mkdir(exist_ok=True)
+            for f in templates_src.rglob("*"):
+                if f.is_file() and "commands" not in f.parts and f.name != "vscode-settings.json":
+                    rel = f.relative_to(templates_src)
+                    dest = spec_dir / "templates" / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+
+        cfg = AGENT_CONFIG.get(ai_assistant, {})
+        folder = (cfg.get("folder") or ".speckit/").rstrip("/")
+        commands_subdir = cfg.get("commands_subdir", "commands")
+        if ai_assistant == "generic":
+            folder = ".speckit"
+        out_commands = base / folder / commands_subdir
+        _generate_commands_from_bundle(bundle_root, ai_assistant, script_type, arg_format, ext, out_commands)
+
+        if ai_assistant == "copilot":
+            agents_dir = base / ".github" / "agents"
+            prompts_dir = base / ".github" / "prompts"
+            prompts_dir.mkdir(parents=True, exist_ok=True)
+            for agent_file in agents_dir.glob("speckit.*.agent.md"):
+                basename = agent_file.stem  # e.g. speckit.plan.agent -> we want speckit.plan
+                agent_name = basename.replace(".agent", "")
+                prompt_file = prompts_dir / (agent_name + ".prompt.md")
+                prompt_file.write_text(f"---\nagent: {agent_name}\n---\n", encoding="utf-8")
+        if ai_assistant == "copilot" and (templates_src / "vscode-settings.json").exists():
+            (base / ".vscode").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(templates_src / "vscode-settings.json", base / ".vscode" / "settings.json")
+
+        # Copy base contents into project_path (same merge logic as zip extraction)
+        for item in base.iterdir():
+            dest_path = project_path / item.name
+            if item.is_dir():
+                if dest_path.exists():
+                    for sub_item in item.rglob("*"):
+                        if sub_item.is_file():
+                            rel = sub_item.relative_to(item)
+                            dest_file = dest_path / rel
+                            dest_file.parent.mkdir(parents=True, exist_ok=True)
+                            if dest_file.name == "settings.json" and dest_file.parent.name == ".vscode":
+                                handle_vscode_settings(sub_item, dest_file, rel, False, tracker)
+                            else:
+                                shutil.copy2(sub_item, dest_file)
+                else:
+                    shutil.copytree(item, dest_path)
+            else:
+                if dest_path.exists() and tracker:
+                    pass
+                shutil.copy2(item, dest_path)
+
+
+def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False, github_token: str = None, template_repo: Optional[str] = None) -> Tuple[Path, dict]:
+    if template_repo:
+        repo_owner, repo_name = _parse_template_repo(template_repo)
+    else:
+        repo_owner = "github"
+        repo_name = "spec-kit"
     if client is None:
         client = httpx.Client(verify=ssl_context)
 
@@ -813,36 +1009,73 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     }
     return zip_path, metadata
 
-def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: StepTracker | None = None, client: httpx.Client = None, debug: bool = False, github_token: str = None) -> Path:
-    """Download the latest release and extract it to create a new project.
-    Returns project_path. Uses tracker if provided (with keys: fetch, download, extract, cleanup)
+def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: StepTracker | None = None, client: httpx.Client = None, debug: bool = False, github_token: str = None, local_zip_path: Optional[Path] = None, template_repo: Optional[str] = None) -> Path:
+    """Download the latest release (or use a local zip or bundled template) and extract it to create a new project.
+    Returns project_path. Uses tracker if provided (with keys: fetch, download, extract, cleanup).
+    If local_zip_path is set, skips download and uses that zip; the file is not deleted afterward.
+    If the package has bundled template_data (e.g. installed from git), uses that instead of downloading.
     """
     current_dir = Path.cwd()
+    used_local_zip = local_zip_path is not None
+    bundle_root = _get_bundled_template_root()
 
-    if tracker:
-        tracker.start("fetch", "contacting GitHub API")
-    try:
-        zip_path, meta = download_template_from_github(
-            ai_assistant,
-            current_dir,
-            script_type=script_type,
-            verbose=verbose and tracker is None,
-            show_progress=(tracker is None),
-            client=client,
-            debug=debug,
-            github_token=github_token
-        )
+    if used_local_zip:
+        zip_path = Path(local_zip_path).resolve()
+        if not zip_path.is_file():
+            raise FileNotFoundError(f"Template zip not found: {zip_path}")
+        if zip_path.suffix.lower() != ".zip":
+            raise ValueError(f"Template path is not a .zip file: {zip_path}")
+        meta = {"filename": zip_path.name, "size": zip_path.stat().st_size, "release": "local"}
         if tracker:
-            tracker.complete("fetch", f"release {meta['release']} ({meta['size']:,} bytes)")
-            tracker.add("download", "Download template")
-            tracker.complete("download", meta['filename'])
-    except Exception as e:
+            tracker.start("fetch", "using local template")
+            tracker.complete("fetch", meta["filename"])
+            tracker.add("download", "Local template")
+            tracker.complete("download", meta["filename"])
+    elif bundle_root:
         if tracker:
-            tracker.error("fetch", str(e))
-        else:
-            if verbose:
-                console.print(f"[red]Error downloading template:[/red] {e}")
-        raise
+            tracker.start("fetch", "using bundled template")
+            tracker.complete("fetch", "template_data")
+            tracker.add("download", "Bundled template")
+            tracker.complete("download", "template_data")
+        if tracker:
+            tracker.add("extract", "Extract template")
+            tracker.start("extract")
+        elif verbose:
+            console.print("Extracting from bundled template...")
+        if not is_current_dir:
+            project_path.mkdir(parents=True)
+        _extract_from_bundled_template(bundle_root, project_path, ai_assistant, script_type, is_current_dir, tracker=tracker)
+        if tracker:
+            tracker.complete("extract")
+            tracker.add("cleanup", "Cleanup")
+            tracker.complete("cleanup")
+        return project_path
+    else:
+        if tracker:
+            tracker.start("fetch", "contacting GitHub API")
+        try:
+            zip_path, meta = download_template_from_github(
+                ai_assistant,
+                current_dir,
+                script_type=script_type,
+                verbose=verbose and tracker is None,
+                show_progress=(tracker is None),
+                client=client,
+                debug=debug,
+                github_token=github_token,
+                template_repo=template_repo,
+            )
+            if tracker:
+                tracker.complete("fetch", f"release {meta['release']} ({meta['size']:,} bytes)")
+                tracker.add("download", "Download template")
+                tracker.complete("download", meta['filename'])
+        except Exception as e:
+            if tracker:
+                tracker.error("fetch", str(e))
+            else:
+                if verbose:
+                    console.print(f"[red]Error downloading template:[/red] {e}")
+            raise
 
     if tracker:
         tracker.add("extract", "Extract template")
@@ -951,14 +1184,16 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
             tracker.complete("extract")
     finally:
         if tracker:
-            tracker.add("cleanup", "Remove temporary archive")
+            tracker.add("cleanup", "Remove temporary archive" if not used_local_zip else "Cleanup")
 
-        if zip_path.exists():
+        if not used_local_zip and zip_path.exists():
             zip_path.unlink()
             if tracker:
                 tracker.complete("cleanup")
             elif verbose:
                 console.print(f"Cleaned up: {zip_path.name}")
+        elif used_local_zip and tracker:
+            tracker.complete("cleanup")
 
     return project_path
 
@@ -1258,6 +1493,8 @@ def init(
     debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
     github_token: str = typer.Option(None, "--github-token", help="GitHub token to use for API requests (or set GH_TOKEN or GITHUB_TOKEN environment variable)"),
     ai_skills: bool = typer.Option(False, "--ai-skills", help="Install Prompt.MD templates as agent skills (requires --ai)"),
+    template_zip: Optional[str] = typer.Option(None, "--template-zip", help="Path to a local template zip (from create-release-packages.sh) to use instead of downloading from GitHub"),
+    template_repo: Optional[str] = typer.Option(None, "--template-repo", help="GitHub repo for template as owner/repo (e.g. myuser/spec-kit). Overrides SPECIFY_TEMPLATE_REPO. Default: github/spec-kit"),
 ):
     """
     Initialize a new Specify project from the latest template.
@@ -1265,7 +1502,7 @@ def init(
     This command will:
     1. Check that required tools are installed (git is optional)
     2. Let you choose your AI assistant
-    3. Download the appropriate template from GitHub
+    3. Download the appropriate template from GitHub (or use a local zip with --template-zip)
     4. Extract the template to a new project directory or current directory
     5. Initialize a fresh git repository (if not --no-git and no existing repo)
     6. Optionally set up AI assistant commands
@@ -1285,9 +1522,32 @@ def init(
         specify init my-project --ai claude --ai-skills   # Install agent skills
         specify init --here --ai gemini --ai-skills
         specify init my-project --ai generic --ai-commands-dir .myagent/commands/  # Unsupported agent
+        specify init my-project --ai claude --template-zip .genreleases/spec-kit-template-claude-sh-v0.0.0.zip  # Use local zip
+        specify init my-project --ai claude --template-repo myuser/spec-kit  # Use fork's latest release
     """
 
     show_banner()
+
+    # Resolve template repo: CLI option overrides env SPECIFY_TEMPLATE_REPO
+    effective_template_repo: Optional[str] = template_repo or os.environ.get("SPECIFY_TEMPLATE_REPO") or None
+    if effective_template_repo:
+        try:
+            _parse_template_repo(effective_template_repo)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] Invalid --template-repo / SPECIFY_TEMPLATE_REPO: {e}")
+            console.print("[yellow]Use format:[/yellow] owner/repo (e.g. myuser/spec-kit)")
+            raise typer.Exit(1)
+
+    # Resolve local template zip if provided
+    local_zip_path: Optional[Path] = None
+    if template_zip:
+        local_zip_path = Path(template_zip).resolve()
+        if not local_zip_path.is_file():
+            console.print(f"[red]Error:[/red] --template-zip file not found: {local_zip_path}")
+            raise typer.Exit(1)
+        if local_zip_path.suffix.lower() != ".zip":
+            console.print(f"[red]Error:[/red] --template-zip must be a .zip file: {local_zip_path}")
+            raise typer.Exit(1)
 
     # Detect when option values are likely misinterpreted flags (parameter ordering issue)
     if ai_assistant and ai_assistant.startswith("--"):
@@ -1321,6 +1581,11 @@ def init(
     if ai_skills and not ai_assistant:
         console.print("[red]Error:[/red] --ai-skills requires --ai to be specified")
         console.print("[yellow]Usage:[/yellow] specify init <project> --ai <agent> --ai-skills")
+        raise typer.Exit(1)
+
+    if template_zip and (not ai_assistant or not script_type):
+        console.print("[red]Error:[/red] --template-zip requires both --ai and --script (the zip must match that agent and script type)")
+        console.print("[yellow]Example:[/yellow] specify init my-project --ai claude --script sh --template-zip .genreleases/spec-kit-template-claude-sh-v0.0.0.zip")
         raise typer.Exit(1)
 
     if here:
@@ -1469,7 +1734,7 @@ def init(
             local_ssl_context = ssl_context if verify else False
             local_client = httpx.Client(verify=local_ssl_context)
 
-            download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug, github_token=github_token)
+            download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug, github_token=github_token, local_zip_path=local_zip_path, template_repo=effective_template_repo)
 
             # For generic agent, rename placeholder directory to user-specified path
             if selected_ai == "generic" and ai_commands_dir:

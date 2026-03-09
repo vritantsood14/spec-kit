@@ -7,6 +7,18 @@ Recent changes to the Specify CLI and templates are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-03-09
+
+### Added
+
+- **Bundled template for git installs**: When you install the CLI from a git repo (e.g. `uv tool install specify-cli --from git+https://github.com/USER/spec-kit.git`), `specify init` now uses the **bundled** templates and scripts from that repo instead of downloading from GitHub. Your custom commands and scripts in the fork are used automatically.
+- `--template-repo` and `SPECIFY_TEMPLATE_REPO` to fetch the template from a different GitHub repo (e.g. your fork).
+- `--template-zip` to use a local template zip from `create-release-packages.sh` instead of downloading.
+
+### Changed
+
+- `specify init` prefers: 1) local zip if `--template-zip` is set, 2) bundled template data if present (git installs), 3) download from GitHub (with optional `--template-repo`).
+
 ## [0.1.13] - 2026-03-03
 
 ### Changed
