@@ -69,7 +69,7 @@ detect_project_type() {
         fi
     elif [[ -f "Package.swift" ]]; then
         echo "swift"
-    elif [[ -f ".csproj" ]] || [[ -f "*.csproj" ]]; then
+    elif compgen -G "*.csproj" >/dev/null 2>&1; then
         echo "dotnet"
     else
         echo "unknown"

@@ -65,13 +65,16 @@ find_repo_root() {
 
 REPO_ROOT=$(find_repo_root)
 
+# Run from repo root so detect-project-type and find work correctly
+cd "$REPO_ROOT"
+
 # Check if we have git
 HAS_GIT=false
 if git rev-parse --show-toplevel >/dev/null 2>&1; then
     HAS_GIT=true
 fi
 
-# Detect project type
+# Detect project type (run from REPO_ROOT so package.json, pom.xml, etc. are found)
 PROJECT_TYPE="$("$SCRIPT_DIR/detect-project-type.sh")"
 
 # PROJECT MODE: Document entire project

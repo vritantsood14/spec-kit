@@ -25,20 +25,24 @@ You **MUST** consider the user input before proceeding (if not empty).
    
    Run `.specify/scripts/bash/generate-docs.sh --json` from repo root and parse JSON output.
    
-   Expected JSON structure:
+   Expected JSON structure (when MODE is "feature"):
    ```json
    {
+     "MODE": "feature",
      "FEATURE_DIR": "/path/to/specs/001-feature",
      "BRANCH": "001-feature-name",
      "PLAN_FILE": "/path/to/plan.md",
      "REVIEW_FILE": "/path/to/review.md",
      "SPEC_FILE": "/path/to/spec.md",
+     "TASKS_FILE": "/path/to/specs/001-feature/tasks.md",
      "PROJECT_TYPE": "spring-boot|nodejs|python|etc",
      "SCOPE": "all|readme|code-comments|api-docs",
      "CHANGED_FILES": ["src/file1.java", "src/file2.java"],
      "REPO_ROOT": "/path/to/repo"
    }
    ```
+
+   When MODE is "project", the script outputs SOURCE_FILES and HAS_GIT instead of CHANGED_FILES and TASKS_FILE.
 
 2. **Load Documentation Artifacts**:
    

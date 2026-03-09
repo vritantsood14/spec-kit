@@ -9,11 +9,12 @@
 </p>
 
 <p align="center">
-    <a href="https://github.com/github/spec-kit/actions/workflows/release.yml"><img src="https://github.com/github/spec-kit/actions/workflows/release.yml/badge.svg" alt="Release"/></a>
-    <a href="https://github.com/github/spec-kit/stargazers"><img src="https://img.shields.io/github/stars/github/spec-kit?style=social" alt="GitHub stars"/></a>
-    <a href="https://github.com/github/spec-kit/blob/main/LICENSE"><img src="https://img.shields.io/github/license/github/spec-kit" alt="License"/></a>
-    <a href="https://github.github.io/spec-kit/"><img src="https://img.shields.io/badge/docs-GitHub_Pages-blue" alt="Documentation"/></a>
+    <a href="https://github.com/vritantsood14/spec-kit/actions/workflows/release.yml"><img src="https://github.com/vritantsood14/spec-kit/actions/workflows/release.yml/badge.svg" alt="Release"/></a>
+    <a href="https://github.com/vritantsood14/spec-kit/stargazers"><img src="https://img.shields.io/github/stars/vritantsood14/spec-kit?style=social" alt="GitHub stars"/></a>
+    <a href="https://github.com/vritantsood14/spec-kit/blob/main/LICENSE"><img src="https://img.shields.io/github/license/vritantsood14/spec-kit" alt="License"/></a>
 </p>
+
+> **Using this fork:** This repo is the primary source for your team. Install from here to get all custom commands and templates. `specify init` will automatically use this repo's bundled templates when installed via `uv tool install --from git+https://github.com/vritantsood14/spec-kit.git`.
 
 ---
 
@@ -48,11 +49,13 @@ Choose your preferred installation method:
 
 #### Option 1: Persistent Installation (Recommended)
 
-Install once and use everywhere:
+Install once and use everywhere. **Use this repo** to get all custom commands and templates:
 
 ```bash
-uv tool install specify-cli --from git+https://github.com/github/spec-kit.git
+uv tool install specify-cli --from git+https://github.com/vritantsood14/spec-kit.git
 ```
+
+When installed from this repo, `specify init` automatically uses the bundled templates (no download from GitHub). Your custom commands in `templates/commands/` are included.
 
 Then use the tool directly:
 
@@ -60,8 +63,8 @@ Then use the tool directly:
 # Create new project
 specify init <PROJECT_NAME>
 
-# Or initialize in existing project
-specify init . --ai claude
+# Or initialize in existing project (e.g. with Cursor)
+specify init . --ai cursor-agent
 # or
 specify init --here --ai claude
 
@@ -72,7 +75,7 @@ specify check
 To upgrade Specify, see the [Upgrade Guide](./docs/upgrade.md) for detailed instructions. Quick upgrade:
 
 ```bash
-uv tool install specify-cli --force --from git+https://github.com/github/spec-kit.git
+uv tool install specify-cli --force --from git+https://github.com/vritantsood14/spec-kit.git
 ```
 
 #### Option 2: One-time Usage
@@ -80,7 +83,7 @@ uv tool install specify-cli --force --from git+https://github.com/github/spec-ki
 Run directly without installing:
 
 ```bash
-uvx --from git+https://github.com/github/spec-kit.git specify init <PROJECT_NAME>
+uvx --from git+https://github.com/vritantsood14/spec-kit.git specify init <PROJECT_NAME>
 ```
 
 **Benefits of persistent installation:**
@@ -202,6 +205,8 @@ The `specify` command supports the following options:
 | `--debug`              | Flag     | Enable detailed debug output for troubleshooting                                                                                                                                             |
 | `--github-token`       | Option   | GitHub token for API requests (or set GH_TOKEN/GITHUB_TOKEN env variable)                                                                                                                    |
 | `--ai-skills`          | Flag     | Install Prompt.MD templates as agent skills in agent-specific `skills/` directory (requires `--ai`)                                                                                          |
+| `--template-repo`     | Option   | GitHub repo for template as `owner/repo` (e.g. `vritantsood14/spec-kit`). Overrides `SPECIFY_TEMPLATE_REPO`. Default when not using bundled template: `github/spec-kit`                     |
+| `--template-zip`     | Option   | Path to a local template zip from `create-release-packages.sh` to use instead of downloading (requires `--ai` and `--script`)                                                               |
 
 ### Examples
 
@@ -267,13 +272,19 @@ specify init my-project --ai claude --ai-skills
 # Initialize in current directory with agent skills
 specify init --here --ai gemini --ai-skills
 
+# Use this repo's templates from GitHub (when not using bundled install)
+specify init my-project --ai cursor-agent --template-repo vritantsood14/spec-kit
+
+# Use a local template zip (e.g. from create-release-packages.sh)
+specify init my-project --ai cursor-agent --script sh --template-zip .genreleases/spec-kit-template-cursor-agent-sh-v0.1.14.zip
+
 # Check system requirements
 specify check
 ```
 
 ### Available Slash Commands
 
-After running `specify init`, your AI coding agent will have access to these slash commands for structured development:
+After running `specify init` (from this repo), your AI coding agent will have access to these slash commands. **All commands come from this repo's `templates/commands/`** — including any custom commands you've added.
 
 #### Core Commands
 
@@ -297,11 +308,24 @@ Additional commands for enhanced quality and validation:
 | `/speckit.analyze`   | Cross-artifact consistency & coverage analysis (run after `/speckit.tasks`, before `/speckit.implement`)                             |
 | `/speckit.checklist` | Generate custom quality checklists that validate requirements completeness, clarity, and consistency (like "unit tests for English") |
 
+#### Additional Commands (from this repo)
+
+| Command                     | Description                                                          |
+| --------------------------- | -------------------------------------------------------------------- |
+| `/speckit.readme`           | Update project README with feature overview                          |
+| `/speckit.apidocs`         | Generate API documentation from implementation and contracts        |
+| `/speckit.document`        | Document a specific file or module                                    |
+| `/speckit.document-project`| Generate comprehensive documentation for the entire project           |
+| `/speckit.taskstoissues`   | Convert tasks into dependency-ordered GitHub issues                   |
+
+> **Custom commands:** Add `.md` files to `templates/commands/` in this repo. After reinstalling (`uv tool install specify-cli --force --from git+https://github.com/vritantsood14/spec-kit.git`), new projects will include them.
+
 ### Environment Variables
 
-| Variable          | Description                                                                                                                                                                                                                                                                                            |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SPECIFY_FEATURE` | Override feature detection for non-Git repositories. Set to the feature directory name (e.g., `001-photo-albums`) to work on a specific feature when not using Git branches.<br/>\*\*Must be set in the context of the agent you're working with prior to using `/speckit.plan` or follow-up commands. |
+| Variable                 | Description                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SPECIFY_FEATURE`        | Override feature detection for non-Git repositories. Set to the feature directory name (e.g., `001-photo-albums`) to work on a specific feature when not using Git branches.<br/>\*\*Must be set in the context of the agent you're working with prior to using `/speckit.plan` or follow-up commands. |
+| `SPECIFY_TEMPLATE_REPO`  | Default GitHub repo for template as `owner/repo` (e.g. `vritantsood14/spec-kit`). Used when downloading from GitHub instead of bundled template. Overridden by `--template-repo`.                                                                                                                      |
 
 ## 📚 Core Philosophy
 
@@ -368,7 +392,13 @@ If you encounter issues with an agent, please open an issue so we can refine the
 <details>
 <summary>Click to expand the detailed step-by-step walkthrough</summary>
 
-You can use the Specify CLI to bootstrap your project, which will bring in the required artifacts in your environment. Run:
+First install the CLI from this repo (includes all custom commands):
+
+```bash
+uv tool install specify-cli --from git+https://github.com/vritantsood14/spec-kit.git
+```
+
+Then use the Specify CLI to bootstrap your project. Run:
 
 ```bash
 specify init <project_name>
@@ -394,14 +424,15 @@ You will be prompted to select the AI agent you are using. You can also proactiv
 specify init <project_name> --ai claude
 specify init <project_name> --ai gemini
 specify init <project_name> --ai copilot
+specify init <project_name> --ai cursor-agent
 
 # Or in current directory:
 specify init . --ai claude
-specify init . --ai codex
+specify init . --ai cursor-agent
 
 # or use --here flag
 specify init --here --ai claude
-specify init --here --ai codex
+specify init --here --ai cursor-agent
 
 # Force merge into a non-empty current directory
 specify init . --force --ai claude
@@ -667,7 +698,7 @@ rm gcm-linux_amd64.2.6.1.deb
 
 ## 💬 Support
 
-For support, please open a [GitHub issue](https://github.com/github/spec-kit/issues/new). We welcome bug reports, feature requests, and questions about using Spec-Driven Development.
+For support, please open a [GitHub issue](https://github.com/vritantsood14/spec-kit/issues/new). We welcome bug reports, feature requests, and questions about using Spec-Driven Development.
 
 ## 🙏 Acknowledgements
 
